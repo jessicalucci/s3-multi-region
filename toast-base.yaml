@@ -1,0 +1,152 @@
+Description:
+  "3 Region S3 Replica Set"
+Parameters:
+  UniqueIdentifier:
+    Description: String value used to uniquely identify your toast stack
+    Type: String
+Resources:
+########################
+#
+# S3
+#
+########################
+  ToastHost:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Join [ "-", [ !Ref UniqueIdentifier, "toasthost", !Ref "AWS::Region" ] ]
+      NotificationConfiguration:
+        TopicConfigurations:
+        - Event: "s3:ObjectCreated:*"
+          Topic: !Ref ToastNotificationTopic
+    DependsOn:
+      - ToastNotificationTopicPolicy # Ensure topic is created before bucket
+########################
+#
+# SNS
+#
+########################
+  ToastNotificationTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      DisplayName: "TnT"
+      TopicName: !Join [ "-", [ !Ref UniqueIdentifier, "ToastNotificationTopic", !Ref "AWS::Region" ] ]
+  ToastNotificationTopicPolicy:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument: # allow s3 to write to this sns topic
+        Id: ToastNotificationTopicPolicy
+        Statement:
+        - Sid: !Join [ "", [ !Ref UniqueIdentifier, "ToastNotificationTopicPolicy", !Ref "AWS::Region" ] ]
+          Effect: Allow
+          Action: SNS:Publish
+          Resource: "*"
+          Principal:
+            AWS: "*"
+          Condition:
+            ArnLike:
+              aws:SourceArn: !Join
+                - ""
+                - - "arn:aws:s3:*:*:"
+                  - !Join [ "-", [ !Ref UniqueIdentifier, "toasthost", !Ref "AWS::Region" ] ]
+                  - "*"
+      Topics:
+        - !Ref ToastNotificationTopic
+########################
+#
+# SQS
+#
+########################
+  DeadToastQueue:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: !Join [ "-", [ !Ref UniqueIdentifier, "DeadToast", !Ref "AWS::Region" ] ]
+########################
+#
+# Lambda
+#
+########################
+  ToastReplicator:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import ast
+          import boto3
+          import botocore
+          import os
+          import urllib
+          def _get_key_exists(bucket, key):
+              try:
+                  boto3.resource('s3').Object(bucket, key).load()
+              except botocore.exceptions.ClientError as e:
+                  if e.response['Error']['Code'] == "404":
+                      print("404 error: %s" % e)
+                      return False
+                  else:
+                      print("Error checking for key (%s) in bucket %s existence: %s" % (key, bucket, e))
+                      raise e
+              return True
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')             
+              sns_message = ast.literal_eval(event['Records'][0]['Sns']['Message'])
+              source_bucket = str(sns_message['Records'][0]['s3']['bucket']['name'])
+              dest_bucket = os.environ.get('BUCKET_NAME')
+              key = str(urllib.unquote_plus(sns_message['Records'][0]['s3']['object']['key']).decode('utf8'))
+              if not _get_key_exists(dest_bucket, key):
+                  copy_source = {'Bucket':source_bucket, 'Key':key}
+                  s3.copy_object(Bucket=dest_bucket, Key=key, CopySource=copy_source)
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadToastQueue.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Join [ "-", [ !Ref UniqueIdentifier, "toasthost", !Ref "AWS::Region" ] ]
+      FunctionName: !Join [ "-", [ !Ref UniqueIdentifier, "ToastNotifier", !Ref "AWS::Region" ] ]
+      Handler: "index.lambda_handler"
+      Role: !GetAtt ToastReplicatorRole.Arn
+      Runtime: python2.7
+      MemorySize: 256
+      Timeout: 60 # 60 second timeout
+  ToastReplicatorRole: # allow lambda to assume role
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Join [ "-", [ !Ref UniqueIdentifier, "ToastReplicatorRole", !Ref "AWS::Region" ] ]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Sid: !Join [ "", [ !Ref UniqueIdentifier, "ToastReplicatorRolePolicy" ] ]
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "ToastNotificationLoggingPolicy"
+          PolicyDocument: # allow lambda to write logs
+            Id: ToastNotificationLoggingPolicy
+            Statement:
+            - Sid: !Join [ "", [ !Ref UniqueIdentifier, "ToastNotificationLoggingPolicy" ] ]
+              Effect: Allow
+              Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+              Resource: "*"
+        - PolicyName: "ToastNotificationDLQPolicy"
+          PolicyDocument: # allow lambda to write to DLQ
+            Id: ToastNotificationDLQPolicy
+            Statement:
+            - Sid: !Join [ "", [ !Ref UniqueIdentifier, "ToastNotificationDLQPolicy" ] ]
+              Effect: Allow
+              Action: "sqs:*"
+              Resource: !GetAtt DeadToastQueue.Arn
+        - PolicyName: "ToastHostReplicationPolicy"
+          PolicyDocument: # allow lambda to read/write to local s3
+            Id: ToastHostReplicationPolicy
+            Statement:
+            - Sid: !Join [ "", [ !Ref UniqueIdentifier, "ToastHostReplicationPolicy" ] ]
+              Effect: Allow
+              Action:
+              - "s3:Get*"
+              - "s3:List*"
+              - "s3:Put*"
+              Resource: !Join [ "", [ !GetAtt ToastHost.Arn, "*" ] ]

@@ -1,0 +1,73 @@
+Description:
+  ""
+Parameters:
+  ToRegion:
+    Description: String value used to uniquely identify your toast stack
+    Type: String
+  UniqueIdentifier:
+    Description: String value used to uniquely identify your toast stack
+    Type: String
+Resources:
+  ToastReplicationPermission: # give sns toast notification topic permission to invoke the toast replication lambda
+      Type: "AWS::Lambda::Permission"
+      Properties:
+        Action: "lambda:InvokeFunction"
+        FunctionName: !Join
+          - ""
+          - - "arn:aws:lambda:"
+            - !Ref "AWS::Region"
+            - ":"
+            - !Ref "AWS::AccountId"
+            - ":function:"
+            - !Join [ "-", [ !Ref UniqueIdentifier, "ToastNotifier", !Ref "AWS::Region" ] ]
+        Principal: "sns.amazonaws.com"
+        SourceArn: !Join
+         - ""
+         - - "arn:aws:sns:"
+           - !Ref ToRegion
+           - ":"
+           - !Ref "AWS::AccountId"
+           - ":"
+           - !Join [ "-", [ !Ref UniqueIdentifier, "ToastNotificationTopic", !Ref ToRegion ] ]
+  RemoteToastHostReplicationReadPolicy: # give toast replication lambda permissions to read from remote s3 toast hosts
+      Type: "AWS::IAM::Policy"
+      Properties:
+        PolicyName: !Join [ "-", [ !Ref UniqueIdentifier, "RemoteToastHostReplicationReadPolicy", !Ref ToRegion ] ]
+        PolicyDocument:
+          Id: RemoteToastHostReplicationReadPolicy
+          Statement:
+          - Sid: "RemoteToastHostReplicationReadPolicy"
+            Effect: Allow
+            Action:
+            - "s3:Get*"
+            - "s3:List*"
+            Resource: !Join
+              - ""
+              - - "arn:aws:s3:::"
+                - !Join [ "-", [ !Ref UniqueIdentifier, "toasthost", !Ref ToRegion ] ]
+                - "*"
+        Roles:
+          - !Join [ "-", [ !Ref UniqueIdentifier, "ToastReplicatorRole", !Ref "AWS::Region" ] ]
+  ToastReplicationNotificationSubscription: # subscribe toast replication lambda to sns toast notification topic
+    Type: "AWS::SNS::Subscription"
+    Properties:
+      Endpoint: !Join
+        - ""
+        - - "arn:aws:lambda:"
+          - !Ref ToRegion
+          - ":"
+          - !Ref "AWS::AccountId"
+          - ":function:"
+          - !Join [ "-", [ !Ref UniqueIdentifier, "ToastNotifier", !Ref ToRegion ] ]
+      Protocol: "lambda"
+      TopicArn: !Join
+        - ""
+        - - "arn:aws:sns:"
+          - !Ref "AWS::Region"
+          - ":"
+          - !Ref "AWS::AccountId"
+          - ":"
+          - !Join [ "-", [ !Ref UniqueIdentifier, "ToastNotificationTopic", !Ref "AWS::Region" ] ]
+    DependsOn: # wait for permissions to be created
+    - ToastReplicationPermission
+    - RemoteToastHostReplicationReadPolicy
